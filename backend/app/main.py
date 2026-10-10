@@ -1,19 +1,21 @@
-"""
+"""backend/app/main.py
+
 Student360 FastAPI Backend Application.
-Entry point for ML inference, explainability, trajectory, and cohort insights APIs.
+Entry point for ML inference, explainability, trajectory, holistic scoring,
+cohort insights, RBAC security, and CSV validation APIs.
 """
 
 from contextlib import asynccontextmanager
 import logging
-import sys
 from pathlib import Path
+import sys
 
 # Ensure project root is in sys.path so ml.* modules are resolvable
 _project_root = Path(__file__).resolve().parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from fastapi import FastAPI, Request, status
+from fastapi import Depends, FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -21,13 +23,23 @@ from backend.app.config import (
     ALLOWED_ORIGINS,
     PROJECT_NAME,
 )
+from backend.app.core.security import (
+    AuthenticatedUser,
+    get_current_user,
+)
 from backend.app.routes import (
+    assignments_router,
+    assistant_router,
+    attendance_router,
     cohort_router,
+    college_router,
+    data_import_router,
     intervention_router,
+    scoring_router,
     simulation_router,
     students_router,
 )
-from backend.app.schemas import HealthResponse
+from backend.app.schemas import HealthResponse, UserProfile
 from backend.app.services.model_service import model_service
 from backend.app.services.student_service import student_service
 
@@ -41,12 +53,13 @@ logger = logging.getLogger("student360.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Warm up cached artifacts and demo students during startup."""
+    """Warm up cached artifacts and cohort students during startup."""
     logger.info("Initializing Student360 ML backend...")
     try:
         model_service.load_artifacts()
-        student_service._ensure_loaded()
-        logger.info("Artifacts and demo students successfully preloaded.")
+        all_students = student_service.get_all_students()
+        model_service.warm_cache_for_cohort(all_students)
+        logger.info("Artifacts and %d cohort students successfully preloaded and warm cached.", len(all_students))
     except Exception as exc:
         logger.error("Error preloading artifacts on startup: %s", exc)
     yield
@@ -59,6 +72,7 @@ app = FastAPI(
     description=(
         "Production-ready FastAPI backend and API orchestration layer for the Student360 platform. "
         "Provides real XGBoost risk inference, SHAP explanations, Sem1->Sem2 trajectories, "
+        "rules-based holistic Student Success Scores & Placement Readiness, RBAC access control, "
         "and cohort-wide analytics."
     ),
     docs_url="/docs",
@@ -67,17 +81,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS Configuration
+# CORS Configuration - allow configured origins and any local dev origin regex
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS else ["*"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# Exception handler for unhandled errors
+# Centralized exception handler for unhandled errors
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error("Unhandled server exception at %s: %s", request.url.path, exc, exc_info=True)
@@ -100,8 +115,34 @@ def health_check() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-# Register Routers
+# Current user profile endpoint (RBAC identity verification)
+@app.get(
+    "/auth/me",
+    response_model=UserProfile,
+    tags=["Authentication"],
+    summary="Get current authenticated user and permissions",
+    description="Inspects caller role (Student, Faculty, Admin) and assigned student boundaries.",
+)
+def get_current_user_profile(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> UserProfile:
+    """Returns caller profile and authorization context."""
+    return UserProfile(
+        user_id=current_user.user_id,
+        role=current_user.role,
+        email=current_user.email or f"{current_user.user_id.lower()}@campus.edu",
+        assigned_students=current_user.assigned_students,
+    )
+
+
+# Register All Routers
 app.include_router(students_router)
 app.include_router(simulation_router)
 app.include_router(intervention_router)
 app.include_router(cohort_router)
+app.include_router(scoring_router)
+app.include_router(data_import_router)
+app.include_router(assignments_router)
+app.include_router(attendance_router)
+app.include_router(college_router)
+app.include_router(assistant_router)

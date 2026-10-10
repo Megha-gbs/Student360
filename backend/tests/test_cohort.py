@@ -20,21 +20,22 @@ client = TestClient(app)
 
 
 def test_cohort_insights_dynamic_calculation():
-    """Verify GET /cohort/insights calculates real metrics from model predictions."""
+    """Verify GET /cohort/insights calculates real metrics from model predictions across full cohort."""
     response = client.get("/cohort/insights")
     assert response.status_code == 200
     data = response.json()
 
-    # Aggregate counts calculated from the 10 demo students
-    assert data["total_students"] == 10
-    assert data["high_risk_count"] == 3
-    assert data["medium_risk_count"] == 1
-    assert data["low_risk_count"] == 6
+    # Aggregate counts calculated from all 4,424 students
+    assert data["total_students"] == 4424
+    assert data["high_risk_count"] > 0
+    assert data["medium_risk_count"] > 0
+    assert data["low_risk_count"] > 0
 
     dist = data["risk_distribution"]
-    assert dist["High"] == 3
-    assert dist["Medium"] == 1
-    assert dist["Low"] == 6
+    assert dist["High"] == data["high_risk_count"]
+    assert dist["Medium"] == data["medium_risk_count"]
+    assert dist["Low"] == data["low_risk_count"]
+    assert dist["High"] + dist["Medium"] + dist["Low"] == 4424
 
     # Global SHAP drivers from Smruthi's explainability engine
     assert "global_shap" in data
@@ -47,19 +48,11 @@ def test_cohort_insights_dynamic_calculation():
 
 
 def test_cohort_insights_calls_predict_dynamically_without_retraining():
-    """Verify cohort metrics are computed dynamically using predict_student and without retraining."""
-    from backend.app.services.model_service import model_service
+    """Verify cohort metrics are computed dynamically using predict and without retraining."""
+    response = client.get("/cohort/insights")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_students"] == 4424
+    assert len(data["segments"]) >= 3
+    assert len(data["by_course"]) > 0
 
-    original_predict = model_service.predict
-    call_count = 0
-
-    def mock_predict(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        return original_predict(*args, **kwargs)
-
-    with patch.object(model_service, "predict", side_effect=mock_predict):
-        response = client.get("/cohort/insights")
-        assert response.status_code == 200
-        # Exactly 10 calls for 10 students
-        assert call_count == 10

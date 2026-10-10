@@ -72,8 +72,8 @@ class TrajectoryResponse(BaseModel):
     )
     points: List[TrajectoryPoint] = Field(
         ...,
-        min_items=2,
-        max_items=2,
+        min_length=2,
+        max_length=2,
         description="Exactly two milestone points: Sem 1 and Sem 2 (never weekly points)",
     )
     note: str = Field(

@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color-scheme: light;
+  --bg-page: #FFFFFF;
+  --bg-panel: #FFFFFF;
+  --bg-surface: #F5F5F5;
+  --bg-surface-alt: #F0F0F0;
+  --border-color: #D0D0D0;
+  --text-main: #1A1A1A;
+  --text-secondary: #4A4A4A;
+  --text-muted: #767676;
+  --primary-kpmg: #00338D;
+  --secondary-kpmg: #0091DA;
+  --accent-kpmg: #483698;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--bg-page);
+  color: var(--text-main);
+  font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* Headings */
+h1 {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1A1A1A;
+}
+
+h2 {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1A1A1A;
+}
+
+h3 {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1A1A1A;
+}
+
+/* Table Text */
+table, th, td {
+  font-size: 12.5px;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F5F5F5;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #C0C0C0;
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #A0A0A0;
+}
+
+/* Enterprise Card Panels */
+.card-panel {
+  background-color: #FFFFFF;
+  border: 1px solid #D0D0D0;
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+/* Enterprise Buttons and Inputs */
+button, input, select, textarea {
+  border-radius: 4px;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Zebra-striped tables */
+.table-zebra tbody tr:nth-child(even) {
+  background-color: #F9F9F9;
+}
+
+.table-zebra tbody tr:hover {
+  background-color: #F0F4F8;
+}
+
+/* Subtle inline status */
+.inline-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+}

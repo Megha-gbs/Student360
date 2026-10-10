@@ -43,8 +43,8 @@ def run_verification():
         res = client.get("/students")
         assert res.status_code == 200, f"Expected 200, got {res.status_code}: {res.text}"
         data = res.json()
-        assert data["total"] == 10
-        assert len(data["students"]) == 10
+        assert data["total"] == 4424
+        assert len(data["students"]) == 4424
         s1 = data["students"][0]
         print(f"  -> PASS: Total students: {data['total']}. First student: {s1['student_id']}, Risk: {s1['risk_score']} ({s1['risk_level']}), Trend: {s1['trend']}")
 
@@ -96,15 +96,17 @@ def run_verification():
         print("\n[7] Testing POST /intervene...")
         res = client.post("/intervene", json={"student_id": "S1001", "intervention_type": "advising"})
         assert res.status_code == 200
-        assert res.json()["status"] == "not_integrated"
-        print("  -> PASS: Correctly returns not_integrated:", res.json())
+        assert res.json()["status"] == "drafted"
+        assert res.json()["requires_human_approval"] is True
+        print("  -> PASS: Correctly returns drafted intervention with human approval flag:", res.json())
 
         # 8. POST /students/S1001/simulate-outcome
         print("\n[8] Testing POST /students/S1001/simulate-outcome...")
         res = client.post("/students/S1001/simulate-outcome", json={"intervention_type": "grant"})
         assert res.status_code == 200
-        assert res.json()["status"] == "not_integrated"
-        print("  -> PASS: Correctly returns not_integrated:", res.json())
+        assert res.json()["status"] == "simulated"
+        assert res.json()["badge"] == "SIMULATED DEMONSTRATION OUTCOME"
+        print("  -> PASS: Correctly returns simulated outcome badge:", res.json())
 
         # 9. GET /cohort/insights
         print("\n[9] Testing GET /cohort/insights...")

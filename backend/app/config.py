@@ -35,14 +35,26 @@ ML_DIR: Path = PROJECT_ROOT / "ml"
 MODEL_PATH: Path = MODELS_DIR / "xgboost_model_v1.joblib"
 PREPROCESSOR_PATH: Path = MODELS_DIR / "preprocessor.joblib"
 DEMO_STUDENTS_PATH: Path = DOCS_DIR / "DEMO_STUDENTS.json"
+DATA_PATH: Path = PROJECT_ROOT / "data" / "data.csv"
 
 # API & Security Settings
 PROJECT_NAME: str = os.getenv("PROJECT_NAME", "Student360 API")
 API_V1_STR: str = ""
 ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
 
-# CORS settings: parse comma-separated origins
-CORS_ORIGIN_ENV: str = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173")
-ALLOWED_ORIGINS: List[str] = [origin.strip() for origin in CORS_ORIGIN_ENV.split(",") if origin.strip()]
-if "*" not in ALLOWED_ORIGINS and "http://localhost:3000" not in ALLOWED_ORIGINS:
-    ALLOWED_ORIGINS.append("http://localhost:3000")
+# CORS settings: parse comma-separated origins with robust defaults for local development
+DEFAULT_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:3002",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+]
+CORS_ORIGIN_ENV: str = os.getenv("FRONTEND_ORIGIN", "")
+parsed_env_origins = [origin.strip() for origin in CORS_ORIGIN_ENV.split(",") if origin.strip()]
+ALLOWED_ORIGINS: List[str] = list(dict.fromkeys(DEFAULT_ORIGINS + parsed_env_origins))

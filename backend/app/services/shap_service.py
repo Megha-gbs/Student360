@@ -37,8 +37,11 @@ class SHAPService:
 
         if self._explainer is None:
             try:
-                model = model_service.get_model()
-                self._explainer = StudentSHAPExplainer(model=model)
+                model, preprocessor = model_service.load_artifacts()
+                self._explainer = StudentSHAPExplainer(
+                    model=model,
+                    preprocessor=preprocessor,
+                )
             except Exception as e:
                 logger.error("Failed to initialize StudentSHAPExplainer: %s", e)
                 return None
@@ -79,16 +82,22 @@ class SHAPService:
         Computes cohort-wide global SHAP importance (mean absolute SHAP).
         Returns None if not integrated.
         """
-        if not SMRUTHI_SHAP_AVAILABLE:
+        if not SMRUTHI_SHAP_AVAILABLE or not cohort_features:
             return None
+
+        # Sample representative records for large cohort to ensure sub-100ms response time
+        eval_features = cohort_features
+        if len(cohort_features) > 200:
+            step = max(1, len(cohort_features) // 200)
+            eval_features = cohort_features[::step][:200]
 
         try:
             explainer = self._get_explainer()
             if explainer is not None:
-                return explainer.get_global_shap_list(cohort_features, top_k=top_k)
+                return explainer.get_global_shap_list(eval_features, top_k=top_k)
             else:
                 model = model_service.get_model()
-                res = compute_cohort_global_shap(model=model, cohort_data=cohort_features, top_k=top_k)
+                res = compute_cohort_global_shap(model=model, cohort_data=eval_features, top_k=top_k)
                 return res.get("global_shap", [])
         except Exception as exc:
             logger.error("Error computing cohort global SHAP: %s", exc)

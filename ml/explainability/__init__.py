@@ -9,6 +9,12 @@ from ml.explainability.explainer import (
     compute_cohort_global_shap,
     explain_student_risk,
 )
+from ml.explainability.integration import (
+    analyze_student_full,
+    get_cached_explainer,
+    get_cached_trajectory_generator,
+    predict_and_explain_student,
+)
 from ml.explainability.schemas import (
     GlobalSHAPItem,
     GlobalSHAPResponse,
@@ -32,6 +38,10 @@ __all__ = [
     "StudentSHAPExplainer",
     "explain_student_risk",
     "compute_cohort_global_shap",
+    "predict_and_explain_student",
+    "analyze_student_full",
+    "get_cached_explainer",
+    "get_cached_trajectory_generator",
     "SHAPReason",
     "TopReasonsResponse",
     "GlobalSHAPItem",

@@ -233,3 +233,63 @@ joblib==1.5.3
 - The model is trained on 1st-year academic metrics and socioeconomic indicators from the UCI benchmark.
 - It provides early risk scoring; it does not replace human advisory evaluation.
 - `Enrolled` minority class recall is $47.90\%$ due to transitional enrollment states in the underlying dataset.
+
+---
+
+## 10. Holistic Scoring Subsystem (Success Score & Placement Readiness)
+
+Mohith has provided modular, standalone scoring engines in `ml/scoring/` for holistic student evaluation. These modules are completely independent of the frozen 36-feature XGBoost dropout risk pipeline.
+
+### A. Placement Readiness Score
+- **Module**: `ml.scoring.placement_readiness`
+- **Import**: `from ml.scoring import calculate_placement_readiness`
+- **Provisional Weights**: Aptitude (30%), Coding (30%), Mock Interviews (20%), Technical Skills (20%).
+- **Features**:
+  - Scores clamped to 0–100.
+  - Dynamic weight renormalization when one or more assessment indicators are absent.
+  - Returns `status: "insufficient_data"` and `readiness_score: None` when zero assessment indicators exist.
+  - Tiers: `High` (≥70), `Moderate` (40–69), `Needs Attention` (<40).
+
+```python
+from ml.scoring import calculate_placement_readiness
+
+result = calculate_placement_readiness(
+    aptitude=80.0,
+    coding=90.0,
+    mock_interviews=70.0,
+    technical_skills=85.0
+)
+# Returns:
+# {
+#   "readiness_score": 82,
+#   "readiness_tier": "High",
+#   "status": "calculated",
+#   "weight_coverage": 1.0,
+#   "components": { ... },
+#   "note": "Rules-based provisional readiness assessment..."
+# }
+```
+
+### B. Student Success Score
+- **Module**: `ml.scoring.success_score`
+- **Import**: `from ml.scoring import calculate_success_score, extract_academic_score_from_uci`
+- **Provisional Formula**:
+  $$\text{Success Score} = 0.35 \times \text{Academic} + 0.25 \times \text{Attendance} + 0.15 \times \text{LMS} + 0.10 \times \text{Engagement} + 0.15 \times \text{Placement Readiness}$$
+- **Features**:
+  - Dynamic weight renormalization across available components.
+  - Derives genuine `Academic` score directly from real UCI dataset records when `uci_features` dictionary is supplied.
+  - Requires at least 30% available weight coverage; otherwise returns `status: "insufficient_data"`.
+  - Institutional standing tiers: `Exemplary` (≥85), `Good Standing` (70–84), `Developing` (50–69), `At Risk` (<50).
+  - Clear provenance disclaimer distinguishing holistic success standing from XGBoost dropout risk probability.
+
+```python
+from ml.scoring import calculate_success_score
+
+# Example with academic derived from real UCI student features
+success_result = calculate_success_score(
+    uci_features=student_uci_dict,
+    attendance=90.0,
+    placement_readiness=80.0
+)
+```
+

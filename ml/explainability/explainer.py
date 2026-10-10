@@ -1,15 +1,20 @@
 """ml/explainability/explainer.py
 
 Production-ready SHAP explainability engine for Student360 academic dropout risk.
-Integrates directly with XGBoost models trained on real UCI features.
+Integrates directly with Mohith's trained XGBoost model and scikit-learn ColumnTransformer.
+Transforms raw UCI student features (36 columns) into the 233-feature transformed space,
+runs TreeExplainer, and aggregates SHAP attributions back to the original real UCI feature names.
 Provides per-student risk explanations and cohort-wide global SHAP insights.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import warnings
 from typing import Any, Dict, List, Optional, Sequence, Union
 import numpy as np
+import pandas as pd
 
 from ml.explainability.schemas import (
     GlobalSHAPItem,
@@ -27,7 +32,7 @@ from ml.explainability.uci_schema import (
 
 logger = logging.getLogger("student360.ml.explainability")
 
-# Dynamic import handling for SHAP and XGBoost
+# Dynamic import handling for SHAP
 try:
     import shap  # type: ignore
     SHAP_AVAILABLE = True
@@ -35,6 +40,17 @@ except ImportError:
     shap = None  # type: ignore
     SHAP_AVAILABLE = False
     logger.warning("SHAP is not installed. Explainer will operate in fallback mode.")
+
+# Project paths
+PROJECT_ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DEFAULT_MODEL_PATH: str = os.path.join(PROJECT_ROOT, "models", "xgboost_model_v1.joblib")
+DEFAULT_PREPROCESSOR_PATH: str = os.path.join(PROJECT_ROOT, "models", "preprocessor.joblib")
+
+# Feature order from training
+try:
+    from ml.training.preprocess import FEATURE_ORDER
+except ImportError:
+    FEATURE_ORDER = list(UCI_ALL_FEATURES)
 
 
 def _clean_scalar(val: Any) -> Union[int, float, str, bool]:
@@ -50,7 +66,6 @@ def _clean_scalar(val: Any) -> Union[int, float, str, bool]:
         val_f = float(val)
         if np.isnan(val_f):
             return 0.0
-        # If integer equivalent (e.g. 5.0), preserve integer representation
         if val_f.is_integer():
             return int(val_f)
         return round(val_f, 2)
@@ -87,9 +102,8 @@ def _determine_impact(
 def _determine_direction(shap_value: float) -> RiskDirection:
     """Determine whether the SHAP value increases or decreases dropout risk.
     
-    A positive SHAP value on the Dropout target log-odds/probability pushes
-    the prediction higher (increasing risk of dropout).
-    A negative SHAP value decreases the risk of dropout (protective factor).
+    A positive SHAP value on the Dropout target (class 0) increases dropout risk.
+    A negative SHAP value decreases dropout risk (protective factor).
     """
     return "increases_risk" if shap_value > 0 else "decreases_risk"
 
@@ -98,158 +112,157 @@ class StudentSHAPExplainer:
     """Production SHAP Explainer for Student360 XGBoost risk prediction model.
     
     Strictly uses real UCI dataset features and produces exact frozen JSON contracts.
-    
-    Attributes:
-        model: Trained XGBoost classifier or compatible tree-based model.
-        feature_names: Ordered list of feature names the model was trained on.
-        dropout_class_idx: Index of the 'Dropout' class in multi-class/binary outputs.
-        explainer: Pre-initialized shap.TreeExplainer instance (cached).
+    Seamlessly transforms 36 UCI features through Mohith's ColumnTransformer into
+    the 233-feature space, runs TreeExplainer, and aggregates SHAP scores back
+    to the human-readable original UCI features.
     """
 
     def __init__(
         self,
-        model: Any,
+        model: Optional[Any] = None,
+        preprocessor: Optional[Any] = None,
+        model_path: Optional[str] = None,
+        preprocessor_path: Optional[str] = None,
         feature_names: Optional[Sequence[str]] = None,
-        dropout_class_idx: Optional[int] = None,
+        dropout_class_idx: int = 0,
         validate_features: bool = True,
     ) -> None:
-        """Initialize the SHAP explainer with an XGBoost model.
-        
-        Args:
-            model: Trained XGBoost model (XGBClassifier, Booster, or Pipeline) or path to saved file.
-            feature_names: Names of features in the exact order expected by the model.
-                           If None, attempts to extract from model.feature_names_in_.
-            dropout_class_idx: Target index representing Dropout (auto-detected if None).
-            validate_features: Whether to enforce strict real UCI column name checks.
-        """
-        # Support loading model from filepath string if provided
-        if isinstance(model, str):
-            loaded_model = None
-            try:
-                import joblib  # type: ignore
-                loaded_model = joblib.load(model)
-                logger.info("Loaded model from joblib file: %s", model)
-            except Exception:
-                try:
-                    import pickle
-                    with open(model, "rb") as f:
-                        loaded_model = pickle.load(f)
-                    logger.info("Loaded model from pickle file: %s", model)
-                except Exception as exc:
-                    logger.warning("Could not load model file %s: %s", model, exc)
-            self.model = loaded_model if loaded_model is not None else model
-        else:
-            self.model = model
+        """Initialize the SHAP explainer with XGBoost model and preprocessor artifacts."""
+        self.dropout_class_idx = dropout_class_idx
 
-        # Auto-detect Dropout class index if not explicitly passed
-        if dropout_class_idx is not None:
-            self.dropout_class_idx = dropout_class_idx
-        else:
-            self.dropout_class_idx = 0
-            if hasattr(self.model, "classes_"):
-                try:
-                    classes_list = [str(c).lower() for c in self.model.classes_]
-                    if "dropout" in classes_list:
-                        self.dropout_class_idx = classes_list.index("dropout")
-                    elif len(classes_list) == 2 and 1 in list(self.model.classes_):
-                        self.dropout_class_idx = 1
-                except Exception:
-                    self.dropout_class_idx = 0
+        # 1. Load Model
+        self.model = self._load_artifact(
+            artifact=model,
+            explicit_path=model_path,
+            default_path=DEFAULT_MODEL_PATH,
+            artifact_name="Model",
+        )
 
-        # Resolve feature names
+        # 2. Load Preprocessor
+        self.preprocessor = self._load_artifact(
+            artifact=preprocessor,
+            explicit_path=preprocessor_path,
+            default_path=DEFAULT_PREPROCESSOR_PATH,
+            artifact_name="Preprocessor",
+        )
+
+        # 3. Canonical original feature names
         extracted_features: List[str] = []
         if feature_names is not None:
             extracted_features = [normalize_feature_name(f) for f in feature_names]
-        elif hasattr(self.model, "feature_names_in_"):
-            extracted_features = [normalize_feature_name(f) for f in self.model.feature_names_in_]
-        elif hasattr(self.model, "feature_names") and self.model.feature_names:
-            extracted_features = [normalize_feature_name(f) for f in self.model.feature_names]
         else:
-            extracted_features = list(UCI_ALL_FEATURES)
+            extracted_features = [normalize_feature_name(f) for f in UCI_ALL_FEATURES]
 
         if validate_features:
             self.feature_names = validate_real_uci_features(extracted_features)
         else:
             self.feature_names = extracted_features
 
+        # 4. Map transformed features (233) back to original features (36)
+        self.transformed_feature_names: List[str] = []
+        self.tf_to_orig_map: List[str] = []
+        self._build_transformed_feature_mapping()
+
+        # 5. Initialize TreeExplainer
         self._explainer = None
         self._init_explainer()
 
-    def _init_explainer(self) -> None:
-        """Initialize and cache the SHAP TreeExplainer once at startup."""
-        if not SHAP_AVAILABLE or shap is None or self.model is None:
-            logger.info("Operating in standalone/fallback SHAP mode (shap package or model not loaded).")
+    @staticmethod
+    def _load_artifact(
+        artifact: Any,
+        explicit_path: Optional[str],
+        default_path: str,
+        artifact_name: str,
+    ) -> Any:
+        """Helper to resolve and load joblib/pickle serialized artifacts."""
+        if artifact is not None and not isinstance(artifact, str):
+            return artifact
+
+        target_path = explicit_path or (artifact if isinstance(artifact, str) else None)
+        if target_path is None and os.path.exists(default_path):
+            target_path = default_path
+
+        if target_path and os.path.exists(target_path):
+            try:
+                import joblib  # type: ignore
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore")
+                    loaded = joblib.load(target_path)
+                logger.info("Loaded %s from: %s", artifact_name, target_path)
+                return loaded
+            except Exception as exc:
+                try:
+                    import pickle
+                    with open(target_path, "rb") as f:
+                        loaded = pickle.load(f)
+                    return loaded
+                except Exception as p_exc:
+                    logger.warning("Failed to load %s from %s: %s", artifact_name, target_path, p_exc)
+        return None
+
+    def _build_transformed_feature_mapping(self) -> None:
+        """Map each transformed feature (from ColumnTransformer) back to parent UCI feature."""
+        if self.preprocessor is None or not hasattr(self.preprocessor, "get_feature_names_out"):
             return
 
         try:
-            # Check if model is a scikit-learn Pipeline
+            names_out = list(self.preprocessor.get_feature_names_out())
+            self.transformed_feature_names = names_out
+            self.tf_to_orig_map = []
+
+            canonical_set = {normalize_feature_name(f): f for f in UCI_ALL_FEATURES}
+
+            for tf in names_out:
+                clean = tf.split("__", 1)[1] if "__" in tf else tf
+                norm_clean = normalize_feature_name(clean)
+                matched: Optional[str] = None
+
+                # Direct match
+                if norm_clean in canonical_set:
+                    matched = norm_clean
+                else:
+                    # One-hot prefix match (e.g. 'Course_171' -> 'Course')
+                    for orig_norm in canonical_set:
+                        if (
+                            clean == orig_norm
+                            or clean.startswith(orig_norm + "_")
+                            or norm_clean.startswith(orig_norm + "_")
+                        ):
+                            matched = orig_norm
+                            break
+
+                self.tf_to_orig_map.append(matched or norm_clean)
+        except Exception as exc:
+            logger.warning("Could not map preprocessor feature names: %s", exc)
+
+    def _init_explainer(self) -> None:
+        """Initialize and cache the SHAP TreeExplainer on the underlying XGBoost model."""
+        if not SHAP_AVAILABLE or shap is None or self.model is None:
+            logger.info("Operating in fallback SHAP mode (shap or model unavailable).")
+            return
+
+        try:
             underlying_model = self.model
             if hasattr(self.model, "named_steps") and "classifier" in self.model.named_steps:
                 underlying_model = self.model.named_steps["classifier"]
 
-            self._explainer = shap.TreeExplainer(underlying_model)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore")
+                self._explainer = shap.TreeExplainer(underlying_model)
             logger.info("Initialized shap.TreeExplainer successfully.")
         except Exception as exc:
-            logger.warning(
-                "Could not initialize shap.TreeExplainer directly (%s). Explainer will use dynamic evaluation.",
-                exc,
-            )
+            logger.warning("Could not initialize shap.TreeExplainer (%s). Using fallback.", exc)
             self._explainer = None
-
-    def _extract_dropout_shap_values(
-        self,
-        raw_shap_output: Any,
-        n_samples: int,
-    ) -> np.ndarray:
-        """Safely extract 2D SHAP array corresponding to the Dropout class.
-        
-        Handles:
-        - shap.Explanation objects (shap >= 0.40)
-        - List of numpy arrays (multi-class: [class_0, class_1, class_2])
-        - 3D numpy arrays: (n_samples, n_features, n_classes)
-        - 2D numpy arrays: (n_samples, n_features)
-        - 1D numpy arrays: (n_features,)
-        """
-        # Case 1: Explanation object
-        if hasattr(raw_shap_output, "values"):
-            values = raw_shap_output.values
-            if values.ndim == 3:
-                # Shape: (n_samples, n_features, n_classes)
-                class_idx = min(self.dropout_class_idx, values.shape[2] - 1)
-                return values[:, :, class_idx]
-            elif values.ndim == 2:
-                return values
-            elif values.ndim == 1:
-                return values.reshape(1, -1)
-
-        # Case 2: Multi-class list of arrays
-        if isinstance(raw_shap_output, list):
-            class_idx = min(self.dropout_class_idx, len(raw_shap_output) - 1)
-            arr = np.asarray(raw_shap_output[class_idx])
-            if arr.ndim == 1:
-                return arr.reshape(1, -1)
-            return arr
-
-        # Case 3: 3D numpy array
-        arr = np.asarray(raw_shap_output)
-        if arr.ndim == 3:
-            class_idx = min(self.dropout_class_idx, arr.shape[2] - 1)
-            return arr[:, :, class_idx]
-
-        # Case 4: 2D numpy array
-        if arr.ndim == 2:
-            return arr
-
-        # Case 5: 1D array for single sample
-        if arr.ndim == 1:
-            return arr.reshape(1, -1)
-
-        raise ValueError(f"Unexpected SHAP values shape: {arr.shape}")
 
     @staticmethod
     def _extract_feature_from_record(record: Dict[str, Any], feat: str) -> float:
         """Extract numeric value for a feature name supporting multiple naming conventions."""
         norm_feat = normalize_feature_name(feat)
+        if feat in record:
+            try:
+                return float(record[feat])
+            except (ValueError, TypeError):
+                pass
         if norm_feat in record:
             try:
                 return float(record[norm_feat])
@@ -268,89 +281,85 @@ class StudentSHAPExplainer:
                     pass
         return 0.0
 
-    def _format_input_matrix(
+    @staticmethod
+    def _extract_raw_value_from_record(record: Dict[str, Any], feat: str) -> Any:
+        """Retrieve original raw scalar value preserving int/float/str."""
+        norm_feat = normalize_feature_name(feat)
+        if feat in record:
+            return record[feat]
+        if norm_feat in record:
+            return record[norm_feat]
+        if norm_feat + "\t" in record:
+            return record[norm_feat + "\t"]
+
+        norm_lower = norm_feat.lower()
+        norm_snake = norm_lower.replace(" ", "_")
+        for k, v in record.items():
+            k_norm = normalize_feature_name(str(k)).lower()
+            if k_norm == norm_lower or k_norm.replace(" ", "_") == norm_snake:
+                return v
+        return 0
+
+    def _build_dataframe_from_records(
         self,
-        data: Union[Dict[str, Any], Sequence[Dict[str, Any]], np.ndarray, Any],
-    ) -> tuple[np.ndarray, List[Dict[str, Any]]]:
-        """Convert various input formats into ordered 2D numpy matrix and dict records."""
-        # Check if pandas DataFrame
-        if hasattr(data, "to_dict") and hasattr(data, "columns"):
-            records = data.to_dict(orient="records")
-            matrix = np.zeros((len(records), len(self.feature_names)), dtype=np.float32)
-            for i, rec in enumerate(records):
-                for j, feat in enumerate(self.feature_names):
-                    matrix[i, j] = self._extract_feature_from_record(rec, feat)
-            return matrix, records
+        records: List[Dict[str, Any]],
+    ) -> pd.DataFrame:
+        """Construct pandas DataFrame matching FEATURE_ORDER expected by preprocessor."""
+        rows: List[Dict[str, Any]] = []
+        for rec in records:
+            row_dict: Dict[str, Any] = {}
+            for col in FEATURE_ORDER:
+                row_dict[col] = self._extract_feature_from_record(rec, col)
+            rows.append(row_dict)
+        return pd.DataFrame(rows)[FEATURE_ORDER]
 
-        # Single dictionary
-        if isinstance(data, dict):
-            records = [data]
-            matrix = np.zeros((1, len(self.feature_names)), dtype=np.float32)
-            for j, feat in enumerate(self.feature_names):
-                matrix[0, j] = self._extract_feature_from_record(data, feat)
-            return matrix, records
+    def _extract_dropout_shap_values(
+        self,
+        raw_shap_output: Any,
+    ) -> np.ndarray:
+        """Safely extract 2D SHAP array corresponding to the Dropout class (class 0)."""
+        if hasattr(raw_shap_output, "values"):
+            values = raw_shap_output.values
+            if values.ndim == 3:
+                idx = min(self.dropout_class_idx, values.shape[2] - 1)
+                return values[:, :, idx]
+            elif values.ndim == 2:
+                return values
+            elif values.ndim == 1:
+                return values.reshape(1, -1)
 
-        # List of dictionaries
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
-            records = data
-            matrix = np.zeros((len(records), len(self.feature_names)), dtype=np.float32)
-            for i, rec in enumerate(records):
-                for j, feat in enumerate(self.feature_names):
-                    matrix[i, j] = self._extract_feature_from_record(rec, feat)
-            return matrix, records
+        if isinstance(raw_shap_output, list):
+            idx = min(self.dropout_class_idx, len(raw_shap_output) - 1)
+            arr = np.asarray(raw_shap_output[idx])
+            return arr.reshape(1, -1) if arr.ndim == 1 else arr
 
-        # Direct numpy array
-        if isinstance(data, np.ndarray):
-            arr = data if data.ndim == 2 else data.reshape(1, -1)
-            records = []
-            for i in range(arr.shape[0]):
-                rec = {
-                    feat: arr[i, j]
-                    for j, feat in enumerate(self.feature_names[: arr.shape[1]])
-                }
-                records.append(rec)
-            return arr, records
+        arr = np.asarray(raw_shap_output)
+        if arr.ndim == 3:
+            idx = min(self.dropout_class_idx, arr.shape[2] - 1)
+            return arr[:, :, idx]
+        elif arr.ndim == 2:
+            return arr
+        elif arr.ndim == 1:
+            return arr.reshape(1, -1)
 
-        raise TypeError(f"Unsupported data type for explainer input: {type(data)}")
+        raise ValueError(f"Unexpected SHAP values shape: {arr.shape}")
 
-    def _compute_shap(self, matrix: np.ndarray) -> np.ndarray:
-        """Compute SHAP values using cached TreeExplainer or robust fallback."""
-        if self._explainer is not None:
-            try:
-                raw_shap = self._explainer(matrix)
-                return self._extract_dropout_shap_values(raw_shap, matrix.shape[0])
-            except Exception:
-                try:
-                    raw_shap = self._explainer.shap_values(matrix)
-                    return self._extract_dropout_shap_values(raw_shap, matrix.shape[0])
-                except Exception as e:
-                    logger.warning("shap.TreeExplainer failed (%s); using gradient approximation.", e)
-
-        # Fallback approximation: Feature importance weighted deviations from baseline
-        # Guaranteed to work even when shap C-extensions/packages are absent
-        return self._approximate_shap_values(matrix)
-
-    def _approximate_shap_values(self, matrix: np.ndarray) -> np.ndarray:
-        """Approximation of tree contributions if shap C-bindings are not loaded.
-        
-        Uses feature importance weighting against empirical feature baselines.
-        Ensures system never crashes in test or offline container environments.
-        """
-        n_samples, n_features = matrix.shape
-        shap_approx = np.zeros((n_samples, n_features), dtype=np.float32)
-
-        # Retrieve feature importances from model if available
-        importances = np.ones(n_features, dtype=np.float32) / n_features
-        if hasattr(self.model, "feature_importances_"):
-            fi = np.asarray(self.model.feature_importances_, dtype=np.float32)
-            if len(fi) == n_features:
-                importances = fi / (np.sum(fi) + 1e-8)
-
-        # Domain knowledge heuristics for Dropout risk direction on UCI dataset:
-        # Lower approved units / grades -> INCREASES risk (positive SHAP on dropout)
-        # Tuition not up to date (0) -> INCREASES risk (positive SHAP on dropout)
-        # Debtor (1) -> INCREASES risk (positive SHAP on dropout)
-        # Scholarship holder (0) -> INCREASES risk (positive SHAP on dropout)
+    def _approximate_shap_values(
+        self,
+        student_rec: Dict[str, Any],
+    ) -> Dict[str, float]:
+        """Heuristic fallback when SHAP or model artifacts are unavailable."""
+        medians = {
+            "Curricular units 1st sem (approved)": 5.0,
+            "Curricular units 2nd sem (approved)": 5.0,
+            "Curricular units 1st sem (grade)": 12.0,
+            "Curricular units 2nd sem (grade)": 12.0,
+            "Tuition fees up to date": 1.0,
+            "Scholarship holder": 0.0,
+            "Debtor": 0.0,
+            "Admission grade": 125.0,
+            "Age at enrollment": 20.0,
+        }
         risk_increasing_if_low = {
             "Curricular units 1st sem (approved)",
             "Curricular units 2nd sem (approved)",
@@ -363,39 +372,21 @@ class StudentSHAPExplainer:
         risk_increasing_if_high = {
             "Debtor",
             "Age at enrollment",
-            "Curricular units 1st sem (without evaluations)",
-            "Curricular units 2nd sem (without evaluations)",
         }
 
-        # Plausible typical median baseline in UCI dataset
-        medians = {
-            "Curricular units 1st sem (approved)": 5.0,
-            "Curricular units 2nd sem (approved)": 5.0,
-            "Curricular units 1st sem (grade)": 12.0,
-            "Curricular units 2nd sem (grade)": 12.0,
-            "Tuition fees up to date": 1.0,
-            "Scholarship holder": 0.0,
-            "Debtor": 0.0,
-            "Admission grade": 125.0,
-            "Age at enrollment": 20.0,
-        }
+        shaps: Dict[str, float] = {}
+        for feat in self.feature_names:
+            val = float(self._extract_feature_from_record(student_rec, feat))
+            base_val = medians.get(feat, 0.0)
+            diff = val - base_val
 
-        for j, feat in enumerate(self.feature_names[:n_features]):
-            col_vals = matrix[:, j]
-            base_val = medians.get(feat, float(np.median(col_vals)) if len(col_vals) > 0 else 0.0)
-            diff = col_vals - base_val
-
-            weight = float(importances[j]) * 2.5
             if feat in risk_increasing_if_low:
-                # Lower than baseline -> positive SHAP (increases risk)
-                shap_approx[:, j] = -diff * weight * 0.1
+                shaps[feat] = -diff * 0.1
             elif feat in risk_increasing_if_high:
-                # Higher than baseline -> positive SHAP (increases risk)
-                shap_approx[:, j] = diff * weight * 0.1
+                shaps[feat] = diff * 0.1
             else:
-                shap_approx[:, j] = diff * weight * 0.05
-
-        return shap_approx
+                shaps[feat] = diff * 0.02
+        return shaps
 
     def explain_student(
         self,
@@ -404,38 +395,51 @@ class StudentSHAPExplainer:
     ) -> TopReasonsResponse:
         """Compute top 3-5 risk contributor features for a single student.
         
-        Args:
-            student_data: Dict mapping real UCI feature names to student values.
-            top_k: Number of top contributors to return (constrained between 3 and 5).
-            
-        Returns:
-            TopReasonsResponse matching frozen contract:
-            {"top_reasons": [{"feature": "...", "value": ..., "impact": "...", "direction": "..."}]}
+        Transforms features through preprocessor (233 features), evaluates
+        TreeExplainer on XGBoost model, groups SHAP contributions back to original
+        UCI features, and returns exact frozen JSON contract.
         """
         k = max(3, min(5, top_k))
-        matrix, records = self._format_input_matrix(student_data)
-        student_rec = records[0]
+        student_rec = student_data if isinstance(student_data, dict) else (
+            student_data.to_dict(orient="records")[0] if hasattr(student_data, "to_dict") else dict(student_data)
+        )
 
-        shap_vals_matrix = self._compute_shap(matrix)
-        student_shap = shap_vals_matrix[0]
+        orig_shaps: Dict[str, float] = {}
 
-        # Rank features by absolute SHAP impact in descending order
-        abs_shap = np.abs(student_shap)
-        sorted_indices = np.argsort(-abs_shap)
+        # 1. Primary path: Preprocessor + Model + TreeExplainer
+        if (
+            self.preprocessor is not None
+            and self.model is not None
+            and self._explainer is not None
+            and len(self.tf_to_orig_map) > 0
+        ):
+            try:
+                df = self._build_dataframe_from_records([student_rec])
+                X_trans = self.preprocessor.transform(df)
+                raw_shap = self._explainer(X_trans)
+                dropout_shap_233 = self._extract_dropout_shap_values(raw_shap)[0]
 
-        # Select top k
-        selected_indices = sorted_indices[: min(k, len(sorted_indices))]
-        max_abs = float(abs_shap[selected_indices[0]]) if len(selected_indices) > 0 else 0.0
+                orig_shaps = {normalize_feature_name(f): 0.0 for f in UCI_ALL_FEATURES}
+                for j, parent_name in enumerate(self.tf_to_orig_map):
+                    if parent_name in orig_shaps:
+                        orig_shaps[parent_name] += float(dropout_shap_233[j])
+            except Exception as exc:
+                logger.warning("Pipeline SHAP explanation encountered error (%s); using fallback.", exc)
+                orig_shaps = self._approximate_shap_values(student_rec)
+        else:
+            orig_shaps = self._approximate_shap_values(student_rec)
 
+        # 2. Sort features descending by absolute impact
+        sorted_feats = sorted(orig_shaps.items(), key=lambda x: abs(x[1]), reverse=True)
+        selected = sorted_feats[:k]
+        max_abs = abs(selected[0][1]) if len(selected) > 0 else 0.0
+
+        # 3. Construct exact frozen contract
         top_reasons: List[SHAPReason] = []
-        for rank, idx in enumerate(selected_indices):
-            feat_name = self.feature_names[idx]
-            raw_val = student_rec.get(feat_name, matrix[0, idx])
-            shap_val = float(student_shap[idx])
-            feat_abs = float(abs_shap[idx])
-
-            direction = _determine_direction(shap_val)
-            impact = _determine_impact(feat_abs, max_abs, rank)
+        for rank, (feat_name, net_shap) in enumerate(selected):
+            raw_val = self._extract_raw_value_from_record(student_rec, feat_name)
+            impact = _determine_impact(abs(net_shap), max_abs, rank)
+            direction = _determine_direction(net_shap)
 
             top_reasons.append(
                 SHAPReason(
@@ -455,29 +459,63 @@ class StudentSHAPExplainer:
     ) -> GlobalSHAPResponse:
         """Compute cohort-wide global SHAP summary (mean absolute SHAP values).
         
-        Args:
-            cohort_data: List of student records, or DataFrame of cohort features.
-            top_k: Optional number of top features to return (None returns all).
-            
-        Returns:
-            GlobalSHAPResponse matching frozen contract:
-            {"global_shap": [{"feature": "...", "mean_abs_shap": 0.18}, ...]}
+        Evaluates the batch through preprocessor + TreeExplainer, aggregates
+        to original 36 features, and sorts descending by mean absolute SHAP.
         """
-        matrix, _ = self._format_input_matrix(cohort_data)
-        if matrix.shape[0] == 0:
+        records: List[Dict[str, Any]] = []
+        if hasattr(cohort_data, "to_dict") and hasattr(cohort_data, "columns"):
+            records = cohort_data.to_dict(orient="records")
+        elif isinstance(cohort_data, list):
+            records = cohort_data
+        elif isinstance(cohort_data, dict):
+            records = [cohort_data]
+
+        if not records:
             return GlobalSHAPResponse(global_shap=[])
 
-        shap_vals_matrix = self._compute_shap(matrix)
-        mean_abs_shap = np.mean(np.abs(shap_vals_matrix), axis=0)
+        orig_list = [normalize_feature_name(f) for f in UCI_ALL_FEATURES]
+        n_samples = len(records)
 
-        # Sort descending by mean absolute SHAP
+        # 1. Primary path: Preprocessor + TreeExplainer
+        if (
+            self.preprocessor is not None
+            and self.model is not None
+            and self._explainer is not None
+            and len(self.tf_to_orig_map) > 0
+        ):
+            try:
+                df = self._build_dataframe_from_records(records)
+                X_trans = self.preprocessor.transform(df)
+                raw_shap = self._explainer(X_trans)
+                dropout_shap_matrix = self._extract_dropout_shap_values(raw_shap)
+
+                cohort_orig_shap = np.zeros((n_samples, len(orig_list)), dtype=np.float32)
+                for j, parent_name in enumerate(self.tf_to_orig_map):
+                    if parent_name in orig_list:
+                        idx = orig_list.index(parent_name)
+                        cohort_orig_shap[:, idx] += dropout_shap_matrix[:, j]
+
+                mean_abs_shap = np.mean(np.abs(cohort_orig_shap), axis=0)
+            except Exception as exc:
+                logger.warning("Pipeline cohort SHAP failed (%s); using fallback.", exc)
+                mean_abs_shap = np.zeros(len(orig_list), dtype=np.float32)
+        else:
+            # Fallback
+            cohort_orig_shap = np.zeros((n_samples, len(orig_list)), dtype=np.float32)
+            for i, rec in enumerate(records):
+                approx = self._approximate_shap_values(rec)
+                for j, feat in enumerate(orig_list):
+                    cohort_orig_shap[i, j] = approx.get(feat, 0.0)
+            mean_abs_shap = np.mean(np.abs(cohort_orig_shap), axis=0)
+
+        # 2. Sort descending
         sorted_indices = np.argsort(-mean_abs_shap)
         if top_k is not None:
             sorted_indices = sorted_indices[: max(1, top_k)]
 
         global_items: List[GlobalSHAPItem] = []
         for idx in sorted_indices:
-            feat_name = self.feature_names[idx]
+            feat_name = orig_list[idx]
             score = float(mean_abs_shap[idx])
             global_items.append(
                 GlobalSHAPItem(
@@ -493,50 +531,38 @@ class StudentSHAPExplainer:
         cohort_data: Union[Sequence[Dict[str, Any]], Any],
         top_k: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Convenience method returning raw list of feature importances for Cohort Insights.
-        
-        Returns:
-            [{"feature": "...", "mean_abs_shap": 0.18}, ...]
-        """
+        """Convenience method returning raw list of feature importances for Cohort Insights."""
         res = self.explain_cohort(cohort_data, top_k=top_k)
         return [item.to_dict() for item in res.global_shap]
 
 
 def explain_student_risk(
-    model: Any,
-    student_data: Dict[str, Any],
-    feature_names: Optional[Sequence[str]] = None,
+    model: Optional[Any] = None,
+    student_data: Dict[str, Any] = None,
+    preprocessor: Optional[Any] = None,
     top_k: int = 5,
     dropout_class_idx: int = 0,
 ) -> Dict[str, Any]:
-    """Convenience function for FastAPI backend to get student SHAP reasons directly.
-    
-    Returns exact frozen dictionary:
-    {"top_reasons": [{"feature": "...", "value": ..., "impact": "...", "direction": "..."}]}
-    """
+    """Convenience function for FastAPI backend to get student SHAP reasons directly."""
     explainer = StudentSHAPExplainer(
         model=model,
-        feature_names=feature_names,
+        preprocessor=preprocessor,
         dropout_class_idx=dropout_class_idx,
     )
     return explainer.explain_student(student_data, top_k=top_k).to_dict()
 
 
 def compute_cohort_global_shap(
-    model: Any,
-    cohort_data: Union[Sequence[Dict[str, Any]], Any],
-    feature_names: Optional[Sequence[str]] = None,
+    model: Optional[Any] = None,
+    cohort_data: Union[Sequence[Dict[str, Any]], Any] = None,
+    preprocessor: Optional[Any] = None,
     top_k: Optional[int] = 10,
     dropout_class_idx: int = 0,
 ) -> Dict[str, Any]:
-    """Convenience function for FastAPI backend to get cohort global SHAP directly.
-    
-    Returns exact frozen dictionary:
-    {"global_shap": [{"feature": "...", "mean_abs_shap": ...}, ...]}
-    """
+    """Convenience function for FastAPI backend to get cohort global SHAP directly."""
     explainer = StudentSHAPExplainer(
         model=model,
-        feature_names=feature_names,
+        preprocessor=preprocessor,
         dropout_class_idx=dropout_class_idx,
     )
     return explainer.explain_cohort(cohort_data, top_k=top_k).to_dict()

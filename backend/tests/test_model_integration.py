@@ -31,10 +31,10 @@ def test_artifact_caching_and_zero_retraining():
 
 def test_predict_all_demo_students_deterministic():
     """Verify deterministic prediction across all 10 verified demo students."""
-    students = student_service.get_all_students()
-    assert len(students) == 10
+    demo_students = [s for s in student_service.get_all_students() if s.get("prediction")]
+    assert len(demo_students) == 10
 
-    for s in students:
+    for s in demo_students:
         sid = str(s.get("demo_id") or s.get("student_id"))
         features = s.get("features")
         expected_pred = s.get("prediction")

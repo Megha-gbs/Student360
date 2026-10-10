@@ -88,9 +88,14 @@ def validate_inference_features(features: Dict[str, Any]) -> pd.DataFrame:
             f"Input features must not contain the target column '{TARGET_COLUMN}'."
         )
 
+    # Normalize minor whitespace differences (e.g. Daytime/evening attendance vs Daytime/evening attendance\t)
+    features_copy = dict(features)
+    if "Daytime/evening attendance" in features_copy and "Daytime/evening attendance\t" not in features_copy:
+        features_copy["Daytime/evening attendance\t"] = features_copy.pop("Daytime/evening attendance")
+
     # Check for unexpected keys (ignore optional student_id metadata)
     allowed_keys = set(FEATURE_ORDER) | {"student_id"}
-    unexpected_keys = [k for k in features.keys() if k not in allowed_keys]
+    unexpected_keys = [k for k in features_copy.keys() if k not in allowed_keys]
     if unexpected_keys:
         raise ValueError(
             f"Unexpected feature(s) detected: {unexpected_keys}. "
@@ -98,14 +103,14 @@ def validate_inference_features(features: Dict[str, Any]) -> pd.DataFrame:
         )
 
     # Check for missing required features
-    missing_keys = [k for k in FEATURE_ORDER if k not in features]
+    missing_keys = [k for k in FEATURE_ORDER if k not in features_copy]
     if missing_keys:
         raise ValueError(
             f"Missing {len(missing_keys)} required feature(s): {missing_keys}"
         )
 
     # Construct single-row DataFrame in exact frozen order
-    row_data = {col: [features[col]] for col in FEATURE_ORDER}
+    row_data = {col: [features_copy[col]] for col in FEATURE_ORDER}
     return pd.DataFrame(row_data)[FEATURE_ORDER]
 
 
