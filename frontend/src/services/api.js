@@ -10,7 +10,12 @@
 import axios from 'axios';
 
 // Ensure base URL points to the backend root without trailing /api
-const rawBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const defaultBaseUrl =
+  typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
+    ? 'https://student360-gy0b.onrender.com'
+    : 'http://localhost:8000';
+
+const rawBaseUrl = import.meta.env.VITE_API_BASE_URL || defaultBaseUrl;
 export const API_BASE_URL = rawBaseUrl.replace(/\/api\/?$/, '');
 
 const apiClient = axios.create({

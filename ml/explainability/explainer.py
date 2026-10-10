@@ -32,14 +32,17 @@ from ml.explainability.uci_schema import (
 
 logger = logging.getLogger("student360.ml.explainability")
 
-# Dynamic import handling for SHAP
+# Dynamic import handling for SHAP with NumPy 2.x backward compatibility
 try:
+    import numpy as np  # type: ignore
+    if not hasattr(np, "obj2sctype"):
+        np.obj2sctype = lambda rep, default=None: getattr(np.dtype(rep), "type", rep) if not isinstance(rep, type) or not issubclass(rep, np.generic) else rep  # type: ignore
     import shap  # type: ignore
     SHAP_AVAILABLE = True
-except ImportError:
+except Exception:
     shap = None  # type: ignore
     SHAP_AVAILABLE = False
-    logger.warning("SHAP is not installed. Explainer will operate in fallback mode.")
+    logger.warning("SHAP could not be loaded. Explainer will operate in fallback mode.")
 
 # Project paths
 PROJECT_ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

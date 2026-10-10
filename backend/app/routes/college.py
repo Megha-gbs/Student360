@@ -13,7 +13,7 @@ Provides:
 """
 
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 
 from backend.app.core.security import (
     AuthenticatedUser,
@@ -342,9 +342,23 @@ DEMO_USER_ALIASES = {
 }
 
 
+@router.options("/auth/login")
+def login_options() -> Response:
+    return Response(
+        status_code=status.HTTP_200_OK,
+        headers={
+            "Access-Control-Allow-Origin": "https://student360-plum.vercel.app",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-User-Id, X-User-Role",
+            "Access-Control-Allow-Credentials": "true",
+        },
+    )
+
+
 @router.post("/auth/login")
 def login(payload: Dict[str, Any]) -> Dict[str, Any]:
-    username_raw = str(payload.get("username", "")).strip().lower()
+    username_val = payload.get("username") or payload.get("identifier") or payload.get("email") or ""
+    username_raw = str(username_val).strip().lower()
     password = str(payload.get("password", "")).strip()
 
     if not username_raw or not password:

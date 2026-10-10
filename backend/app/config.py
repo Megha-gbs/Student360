@@ -42,8 +42,9 @@ PROJECT_NAME: str = os.getenv("PROJECT_NAME", "Student360 API")
 API_V1_STR: str = ""
 ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
 
-# CORS settings: parse comma-separated origins with robust defaults for local development
+# CORS settings: parse comma-separated origins with robust defaults for local development and deployed frontend
 DEFAULT_ORIGINS = [
+    "https://student360-plum.vercel.app",
     "http://localhost:3000",
     "http://localhost:3001",
     "http://localhost:3002",
